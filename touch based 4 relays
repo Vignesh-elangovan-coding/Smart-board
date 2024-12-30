@@ -1,0 +1,221 @@
+#include <WiFi.h> 
+#include <WiFiManager.h>
+#include <ArduinoIoTCloud.h>
+#include <Arduino_ConnectionHandler.h>
+#include <time.h>
+
+// Device ID and Secret Key for Arduino IoT Cloud
+const char DEVICE_ID[] = "90646041-72d8-4c98-9dba-32fa9e9cb404";
+const char DEVICE_SECRET[] = "TK1asreP3JREwaKJPE9036EV4";
+
+// Relay and Sensor Pins
+#define PIR_PIN 13
+#define LDR_PIN 34
+#define LED_PIN_1 12
+#define RELAY_PIN_1 25
+#define RELAY_PIN_2 26
+#define RELAY_PIN_3 27
+#define RELAY_PIN_4 14
+#define TOUCH_PIN_1 32
+#define TOUCH_PIN_2 33
+#define TOUCH_PIN_3 35
+#define TOUCH_PIN_4 36
+
+unsigned long lastPrintTime = 0; // Timer for controlling ldr print frequency
+const unsigned long printInterval = 1000; // 1-second interval for ldr print
+
+unsigned long lastTouchTime[4] = {0, 0, 0, 0}; // Last activation times for each touch sensor
+const unsigned long debounceDelay = 1000;   // 1 second debounce delay
+
+bool ledState = false;               // Current state of the LED
+unsigned long ledTimer = 0;          // Timer to track LED on duration
+const unsigned long ledDuration = 5000; // LED stays on for 5 seconds
+
+RTC_DATA_ATTR bool relaysState[4] = {false, false, false, false}; // Retain relay states across deep sleep
+
+void goToDeepSleep() {
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)TOUCH_PIN_1, 0); // Wake up on touch pin 1
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)TOUCH_PIN_2, 0); // Wake up on touch pin 2
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)TOUCH_PIN_3, 0); // Wake up on touch pin 3
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)TOUCH_PIN_4, 0); // Wake up on touch pin 4
+  esp_deep_sleep_start();
+}
+
+void handlePIRSensor() {
+  static unsigned long motionEndTime = 0; // Tracks when motion stops
+  static bool motionActive = false;      // Tracks if motion is active
+
+  if (digitalRead(PIR_PIN) == HIGH) {    // Motion detected
+    digitalWrite(LED_PIN_1, HIGH);       // Turn on LED
+    ledState = true;                     // Update LED state
+    motionActive = true;                 // Motion is active
+  } else {                               // No motion detected
+    if (motionActive) {                  // If motion was active previously
+      motionEndTime = millis();          // Record the time motion stopped
+      motionActive = false;              // Reset motion state
+    }
+
+    // Turn off the LED 10 seconds after motion stops
+    if (ledState && (millis() - motionEndTime >= ledDuration)) {
+      digitalWrite(LED_PIN_1, LOW);      // Turn off LED
+      ledState = false;                  // Reset LED state
+    }
+  }
+}
+
+WiFiConnectionHandler ArduinoIoTPreferredConnection(DEVICE_ID, DEVICE_SECRET);
+
+// Cloud properties
+CloudSwitch relayState1;
+CloudSwitch relayState2;
+CloudSwitch relayState3;
+CloudSwitch relayState4;
+float ldrValue; // 5th variable for LDR sensor value
+float ldrPercentage = (ldrValue / 4095.0) * 100.0; // Scale to 0-100%
+
+bool offlineMode = false; // To handle offline scenarios
+
+// Functions for relay state changes
+void onRelayState1Change() {
+  digitalWrite(RELAY_PIN_1, relayState1 ? HIGH : LOW);
+}
+
+void onRelayState2Change() {
+  digitalWrite(RELAY_PIN_2, relayState2 ? HIGH : LOW);
+}
+
+void onRelayState3Change() {
+  digitalWrite(RELAY_PIN_3, relayState3 ? HIGH : LOW);
+}
+
+void onRelayState4Change() {
+  digitalWrite(RELAY_PIN_4, relayState4 ? HIGH : LOW);
+}
+
+
+void syncTimeManually() {
+  // Manually synchronize time using NTP servers
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.println("Synchronizing time...");
+  int retries = 0;
+  while (!time(nullptr) && retries < 10) {
+    Serial.print(".");
+    delay(1000);
+    retries++;
+  }
+
+  if (time(nullptr)) {
+    Serial.println("\nTime synchronized successfully.");
+  } else {
+    Serial.println("\nFailed to synchronize time. Switching to offline mode.");
+    offlineMode = true;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize GPIOs
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(RELAY_PIN_1, OUTPUT);
+  pinMode(RELAY_PIN_2, OUTPUT);
+  pinMode(RELAY_PIN_3, OUTPUT);
+  pinMode(RELAY_PIN_4, OUTPUT);
+  pinMode(LED_PIN_1, OUTPUT);
+
+  // Restore relay states from RTC memory
+  for (int i = 0; i < 4; i++) {
+    digitalWrite((i == 0 ? RELAY_PIN_1 : (i == 1 ? RELAY_PIN_2 : (i == 2 ? RELAY_PIN_3 : RELAY_PIN_4))), relaysState[i] ? HIGH : LOW);
+  }
+
+  // Initialize touch pins
+  touchAttachInterrupt(TOUCH_PIN_1, [] {}, 64);
+  touchAttachInterrupt(TOUCH_PIN_2, [] {}, 64);
+  touchAttachInterrupt(TOUCH_PIN_3, [] {}, 64);
+  touchAttachInterrupt(TOUCH_PIN_4, [] {}, 64);
+
+  // Set relays to LOW initially if not restored
+  digitalWrite(RELAY_PIN_1, LOW);
+  digitalWrite(RELAY_PIN_2, LOW);
+  digitalWrite(RELAY_PIN_3, LOW);
+  digitalWrite(RELAY_PIN_4, LOW);
+
+  // Wi-Fi Manager setup
+  WiFiManager wifiManager;
+  if (!wifiManager.autoConnect("SmartSwitchBoard")) {
+    Serial.println("WiFi connection failed. Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.println("Connected to Wi-Fi.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Sync time manually
+  syncTimeManually();
+
+  if (!offlineMode) {
+    // Arduino IoT Cloud setup
+    ArduinoCloud.setBoardId(DEVICE_ID);
+    ArduinoCloud.setSecretDeviceKey(DEVICE_SECRET);
+
+    ArduinoCloud.addProperty(relayState1, READWRITE, ON_CHANGE, onRelayState1Change);
+    ArduinoCloud.addProperty(relayState2, READWRITE, ON_CHANGE, onRelayState2Change);
+    ArduinoCloud.addProperty(relayState3, READWRITE, ON_CHANGE, onRelayState3Change);
+    ArduinoCloud.addProperty(relayState4, READWRITE, ON_CHANGE, onRelayState4Change);
+
+   ArduinoCloud.addProperty(ldrPercentage, READ, 1 * SECONDS);
+
+
+    ArduinoCloud.begin(ArduinoIoTPreferredConnection);
+  } else {
+    Serial.println("Device is in offline mode.");
+  }
+
+  // Enter deep sleep after setup
+  goToDeepSleep();
+}
+
+void loop() {
+  if (!offlineMode) {
+    ArduinoCloud.update();
+  }
+
+  // Read LDR value
+  ldrValue = analogRead(LDR_PIN);
+  ldrPercentage = (ldrValue / 4095.0) * 100.0; // Scale raw value to percentage
+
+
+  // Print LDR value to Serial Monitor once per second
+  if (millis() - lastPrintTime >= printInterval) {
+    Serial.print("LDR Percentage: ");
+    Serial.print(ldrPercentage);
+    Serial.println("%");
+  }
+
+  // Handle touch sensors
+  unsigned long currentMillis = millis(); // Current time for debounce
+
+  // Touch sensor and relay pins mapped to arrays
+  const int TOUCH_SENSORS[] = {TOUCH_PIN_1, TOUCH_PIN_2, TOUCH_PIN_3, TOUCH_PIN_4};
+  const int RELAYS[] = {RELAY_PIN_1, RELAY_PIN_2, RELAY_PIN_3, RELAY_PIN_4};
+
+  for (int i = 0; i < 4; i++) {
+    int touchValue = touchRead(TOUCH_SENSORS[i]);
+
+    if (touchValue < 64) { // Touch detected
+      if (currentMillis - lastTouchTime[i] > debounceDelay) {
+        digitalWrite(RELAYS[i], !digitalRead(RELAYS[i]));
+        relaysState[i] = !relaysState[i]; // Update relay state in RTC memory
+        lastTouchTime[i] = currentMillis;
+      }
+    }
+  }
+
+  handlePIRSensor(); // Continuously handle PIR sensor logic
+
+  // Enter deep sleep after processing
+  goToDeepSleep();
+}
