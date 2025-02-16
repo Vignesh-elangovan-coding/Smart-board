@@ -1,0 +1,204 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <FirebaseESP32.h>
+#include <DHT.h>
+#include <ACS712.h>
+
+// Define pins
+#define TOUCH_PIN_1 T0
+#define TOUCH_PIN_2 T3
+#define TOUCH_PIN_3 T4
+#define TOUCH_PIN_4 T5
+#define RELAY_PIN_1 23
+#define RELAY_PIN_2 22
+#define RELAY_PIN_3 21
+#define RELAY_PIN_4 19
+#define PIR_PIN 18
+#define LED_PIN 2
+#define LDR_PIN 34
+#define DHT_PIN 17
+#define ACS712_PIN 35
+
+// Define sensor types
+#define DHT_TYPE DHT22
+#define ACS712_TYPE 20
+
+// Firebase credentials
+#define FIREBASE_HOST "https://smartswitchboard-77971-default-rtdb.firebaseio.com/"
+#define FIREBASE_AUTH "ZW3SeRiVDaGgs4VRTOCT6x2RPChF05Xrle2KzNLK"
+
+// Wi-Fi credentials storage
+char ssid[32] = "YourWiFiSSID";
+char password[32] = "YourWiFiPassword";
+
+// Global variables
+DHT dht(DHT_PIN, DHT_TYPE);
+ACS712 acs712(ACS712_PIN, ACS712_TYPE);
+FirebaseData firebaseData;
+FirebaseConfig firebaseConfig;
+AsyncWebServer server(80);
+
+bool relayState[4] = {false, false, false, false};
+bool pirState = false;
+float ldrValue = 0;
+float temperature = 0;
+float humidity = 0;
+float current = 0;
+
+// Touch thresholds
+int touchThresholds[4];
+
+// Timing variables
+unsigned long pirLastDetected = 0;
+bool pirTriggered = false;
+
+// Function prototypes
+void setupWiFi();
+void setupFirebase();
+void handleTouch();
+void handlePIR();
+void handleLDR();
+void handleDHT();
+void handleACS712();
+void handleRelays();
+void uploadLogs();
+
+void setup() {
+    Serial.begin(115200);
+
+    // Initialize pins
+    pinMode(RELAY_PIN_1, OUTPUT);
+    pinMode(RELAY_PIN_2, OUTPUT);
+    pinMode(RELAY_PIN_3, OUTPUT);
+    pinMode(RELAY_PIN_4, OUTPUT);
+    pinMode(PIR_PIN, INPUT);  
+    pinMode(LED_PIN, OUTPUT);
+  
+    dht.begin();
+    acs712.autoMidPoint();
+
+    // Calibrate touch thresholds
+    for (int i = 0; i < 4; i++) {
+        touchThresholds[i] = touchRead(TOUCH_PIN_1 + i);
+        Serial.printf("Touch %d threshold: %d\n", i + 1, touchThresholds[i]);
+    }
+
+    // Initialize Wi-Fi
+    setupWiFi();
+
+    // Initialize Firebase
+    setupFirebase();
+
+    // Start web server for captive portal
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", "<h1>Smart Switch Board</h1><p>Enter Wi-Fi credentials:</p>"
+                                        "<form method='POST' action='/save'>"
+                                        "<input type='text' name='ssid' placeholder='SSID'>"
+                                        "<input type='password' name='password' placeholder='Password'>"
+                                        "<button type='submit'>Save</button></form>");
+    });
+
+    server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
+            strncpy(ssid, request->getParam("ssid", true)->value().c_str(), sizeof(ssid));
+            strncpy(password, request->getParam("password", true)->value().c_str(), sizeof(password));
+            request->send(200, "text/html", "<h1>Credentials Saved</h1><p>Restarting...</p>");
+            delay(1000);
+            ESP.restart();
+        } else {
+            request->send(400, "text/html", "<h1>Error</h1><p>Invalid input</p>");
+        }
+    });
+
+    server.begin();
+}
+
+void loop() {
+    handleTouch();
+    handlePIR();
+    handleLDR();
+    handleDHT();
+    handleACS712();
+    handleRelays();
+    uploadLogs();
+    delay(500);
+}
+
+// Wi-Fi setup
+void setupWiFi() {
+    WiFi.begin(ssid, password);
+    Serial.println("Connecting to Wi-Fi...");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nConnected to Wi-Fi");
+}
+
+// Firebase setup
+void setupFirebase() {
+    firebaseConfig.host = FIREBASE_HOST;
+    firebaseConfig.signer.tokens.legacy_token = FIREBASE_AUTH;  // Corrected line
+    Firebase.begin(&firebaseConfig, nullptr);
+    Firebase.reconnectWiFi(true);
+}
+
+// Handle touch inputs
+void handleTouch() {
+    int touchValues[4] = {touchRead(TOUCH_PIN_1), touchRead(TOUCH_PIN_2), touchRead(TOUCH_PIN_3), touchRead(TOUCH_PIN_4)};
+    for (int i = 0; i < 4; i++) {
+        if (touchValues[i] < touchThresholds[i] * 0.9) {
+            relayState[i] = !relayState[i];
+            Serial.printf("Relay %d toggled\n", i + 1);
+        }
+    }
+}
+
+// Handle PIR sensor
+void handlePIR() {
+    bool currentState = digitalRead(PIR_PIN);
+    if (currentState) {
+        pirLastDetected = millis();
+        pirTriggered = true;
+    }
+
+    if (pirTriggered && millis() - pirLastDetected < 6000) {
+        digitalWrite(LED_PIN, HIGH);
+    } else {
+        digitalWrite(LED_PIN, LOW);
+        pirTriggered = false;
+    }
+}
+
+// Handle LDR
+void handleLDR() {
+    ldrValue = analogRead(LDR_PIN);
+}
+
+// Handle DHT sensor
+void handleDHT() {
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+}
+
+// Handle ACS712 sensor
+void handleACS712() {
+    current = acs712.mA_AC() / 1000.0;  // Convert mA to A
+}
+
+// Control relays
+void handleRelays() {
+    for (int i = 0; i < 4; i++) {
+        digitalWrite(RELAY_PIN_1 + i, relayState[i] ? HIGH : LOW);
+    }
+}
+
+// Upload logs to Firebase
+void uploadLogs() {
+    if (Firebase.ready()) {
+        String logPath = "/logs/device_1";
+        Firebase.setFloat(firebaseData, logPath + "/temperature", temperature);
+        Firebase.setFloat(firebaseData, logPath + "/humidity", humidity);
+        Firebase.setFloat(firebaseData, logPath + "/current", current);
+    }
+}
