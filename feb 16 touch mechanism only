@@ -1,0 +1,81 @@
+// Define the touch and relay pins
+const int touchPins[] = {T0, T3, T4, T5}; // GPIO4, GPIO15, GPIO13, GPIO12
+const int relayPins[] = {16, 17, 18, 19}; // GPIO16, GPIO17, GPIO18, GPIO19
+
+const int numReadings = 10; // Number of readings for averaging
+int readings[4][numReadings]; // Array to hold multiple readings for each touch pin
+int readIndex = 0;
+int total[4] = {0, 0, 0, 0};
+int average[4];
+
+// Initialize touch thresholds
+int thresholds[4];
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 3000; // Update interval (3 seconds)
+
+const int confirmReadings = 5; // Number of consecutive readings to confirm touch
+int touchCount[4] = {0, 0, 0, 0}; // Count of consecutive readings below threshold
+
+void setup() {
+  Serial.begin(115200);
+  for (int i = 0; i < 4; i++) {
+    pinMode(relayPins[i], OUTPUT);
+    digitalWrite(relayPins[i], LOW); // Turn off all relays initially
+
+    // Initialize the array of readings to 0
+    for (int j = 0; j < numReadings; j++) {
+      readings[i][j] = 0;
+    }
+
+    thresholds[i] = touchRead(touchPins[i]) * 0.95; // Set initial thresholds to 95%
+    Serial.print("Initial threshold for touch pin ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.println(thresholds[i]);
+  }
+}
+
+void loop() {
+  // Update average readings and dynamic thresholds
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastUpdate >= updateInterval) {
+    for (int i = 0; i < 4; i++) {
+      total[i] = total[i] - readings[i][readIndex]; // Subtract the last reading
+      readings[i][readIndex] = touchRead(touchPins[i]); // Read the current touch value
+      total[i] = total[i] + readings[i][readIndex]; // Add the current reading
+      average[i] = total[i] / numReadings; // Calculate the average
+
+      thresholds[i] = average[i] * 0.95; // Update threshold dynamically to 95%
+      Serial.print("Periodic update for threshold for touch pin ");
+      Serial.print(i);
+      Serial.print(": ");
+      Serial.println(thresholds[i]);
+    }
+    readIndex = (readIndex + 1) % numReadings; // Advance to the next position in the array
+    lastUpdate = currentMillis;
+  }
+
+  // Touch detection with confirmation
+  for (int i = 0; i < 4; i++) {
+    int touchValue = touchRead(touchPins[i]);
+    Serial.print("Touch value for touch pin ");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.println(touchValue);
+
+    if (touchValue < thresholds[i]) {
+      touchCount[i]++; // Increment touch count if value is below threshold
+      if (touchCount[i] >= confirmReadings) {
+        digitalWrite(relayPins[i], !digitalRead(relayPins[i])); // Toggle relay
+        Serial.print("Relay toggled for touch pin ");
+        Serial.print(i);
+        Serial.print(": ");
+        Serial.println(digitalRead(relayPins[i]));
+        touchCount[i] = 0; // Reset touch count after toggling
+        delay(300); // Debounce delay to prevent multiple toggles
+      }
+    } else {
+      touchCount[i] = 0; // Reset touch count if value is above threshold
+    }
+  }
+}
