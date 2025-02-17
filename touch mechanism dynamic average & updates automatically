@@ -1,40 +1,20 @@
-// Define the touch and relay pins
-const int touchPins[] = {T0, T3, T4, T5}; // GPIO4, GPIO15, GPIO13, GPIO12
-const int relayPins[] = {23, 22, 21, 19}; // GPIO23, GPIO22, GPIO21, GPIO19
-
-const int numReadings = 50; // Increase number of readings for averaging
-int readings[4][numReadings]; // Array to hold multiple readings for each touch pin
-int readIndex = 0;
-int total[4] = {0, 0, 0, 0};
-int average[4];
-
-// Initialize touch thresholds
-int thresholds[4];
-unsigned long lastUpdate = 0;
-const unsigned long updateInterval = 500; // Update interval (0.5 seconds)
-
-const int confirmReadings = 2; // Number of consecutive readings to confirm touch
-int touchCount[4] = {0, 0, 0, 0}; // Count of consecutive readings below threshold
-
-const unsigned long printInterval = 1000; // Print every 1 second
-unsigned long lastPrint = 0;
+const int touchPins[] = {T0, T3, T4, T5}; // Touch pins: GPIO4, GPIO15, GPIO13, GPIO12
+const int relayPins[] = {23, 22, 21, 19}; // Relay pins: GPIO23, GPIO22, GPIO21, GPIO19
+const int numReadings = 40; // Number of readings for averaging
+int readings[4][numReadings] = {}; // Array to hold multiple readings for each touch pin
+int readIndex = 0, total[4] = {}, average[4], thresholds[4];
+unsigned long lastUpdate = 0, lastPrint = 0;
+const unsigned long updateInterval = 1000, printInterval = 1000;
+const int confirmReadings = 3;
+int touchCount[4] = {}; // Count of consecutive readings below threshold
 
 void setup() {
   Serial.begin(115200);
   for (int i = 0; i < 4; i++) {
     pinMode(relayPins[i], OUTPUT);
     digitalWrite(relayPins[i], LOW); // Turn off all relays initially
-
-    // Initialize the array of readings to 0
-    for (int j = 0; j < numReadings; j++) {
-      readings[i][j] = 0;
-    }
-
     thresholds[i] = touchRead(touchPins[i]) * 0.98; // Set initial thresholds to 98%
-    Serial.print("Initial threshold for touch pin ");
-    Serial.print(i);
-    Serial.print(": ");
-    Serial.println(thresholds[i]);
+    Serial.printf("Initial threshold for touch pin %d: %d\n", i, thresholds[i]);
   }
 }
 
@@ -43,16 +23,10 @@ void loop() {
   if (currentMillis - lastUpdate >= updateInterval) {
     for (int i = 0; i < 4; i++) {
       total[i] = 0; // Reset total to 0 before summing up
-      for (int j = 0; j < numReadings; j++) {
-        total[i] += readings[i][j];
-      }
+      for (int j = 0; j < numReadings; j++) total[i] += readings[i][j];
       average[i] = total[i] / numReadings; // Calculate the average
-
       thresholds[i] = average[i] * 0.98; // Update threshold dynamically to 98%
-      Serial.print("Periodic update for threshold for touch pin ");
-      Serial.print(i);
-      Serial.print(": ");
-      Serial.println(thresholds[i]);
+      Serial.printf("Periodic update for threshold for touch pin %d: %d\n", i, thresholds[i]);
     }
     readIndex = (readIndex + 1) % numReadings; // Advance to the next position in the array
     lastUpdate = currentMillis;
@@ -60,23 +34,14 @@ void loop() {
 
   for (int i = 0; i < 4; i++) {
     readings[i][readIndex] = touchRead(touchPins[i]); // Read the current touch value
-
-    // Print touch values at the specified interval
     if (currentMillis - lastPrint >= printInterval) {
-      Serial.print("Touch value for touch pin ");
-      Serial.print(i);
-      Serial.print(": ");
-      Serial.println(readings[i][readIndex]);
+      Serial.printf("Touch value for touch pin %d: %d\n", i, readings[i][readIndex]);
     }
-
     if (readings[i][readIndex] < thresholds[i]) {
       touchCount[i]++; // Increment touch count if value is below threshold
       if (touchCount[i] >= confirmReadings) {
         digitalWrite(relayPins[i], !digitalRead(relayPins[i])); // Toggle relay
-        Serial.print("Relay toggled for touch pin ");
-        Serial.print(i);
-        Serial.print(": ");
-        Serial.println(digitalRead(relayPins[i]));
+        Serial.printf("Relay toggled for touch pin %d: %d\n", i, digitalRead(relayPins[i]));
         touchCount[i] = 0; // Reset touch count after toggling
         delay(300); // Debounce delay to prevent multiple toggles
       }
@@ -85,9 +50,6 @@ void loop() {
     }
   }
 
-  if (currentMillis - lastPrint >= printInterval) {
-    lastPrint = currentMillis;
-  }
-
-  delay(50); // Small delay to help manage the scroll position in the Serial Monitor
+  if (currentMillis - lastPrint >= printInterval) lastPrint = currentMillis;
+  delay(100); // Small delay to help manage the scroll position in the Serial Monitor
 }
